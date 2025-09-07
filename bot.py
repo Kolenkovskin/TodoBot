@@ -5,12 +5,10 @@ import datetime
 import schedule
 import time
 import threading
-import os
 
 # Уникальная метка версии
-VERSION = "v3.5"
+VERSION = "v3.6"
 TOKEN = '8384181109:AAHZ8xVMkg7FGiPWsIP1B0X4LUvl7M5Wopk'
-WEBHOOK_URL = os.environ.get('WEBHOOK_URL')  # Укажем в Heroku
 
 # Вывод версии и времени запуска
 print(f"Запуск бота {VERSION} | Дата и время: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -179,21 +177,12 @@ def run_schedule():
 
 def main():
     application = Application.builder().token(TOKEN).build()
-    if WEBHOOK_URL:
-        application.run_webhook(
-            listen='0.0.0.0',
-            port=int(os.environ.get('PORT', 8443)),
-            url_path=TOKEN,
-            webhook_url=WEBHOOK_URL + TOKEN
-        )
-    else:
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CallbackQueryHandler(button))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        schedule_thread = threading.Thread(target=run_schedule)
-        schedule_thread.start()
-        application.run_polling()
-    application.run_polling()  # Фallback для локального теста
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    schedule_thread = threading.Thread(target=run_schedule)
+    schedule_thread.start()
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
