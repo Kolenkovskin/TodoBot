@@ -5,13 +5,23 @@ import datetime
 import schedule
 import time
 import threading
+import stripe
+import binance
+import os
 
 # Уникальная метка версии
-VERSION = "v3.30"
+VERSION = "v3.32"
 TOKEN = '8384181109:AAHZ8xVMkg7FGiPWsIP1B0X4LUvl7M5Wopk'
 
 # Вывод версии и времени запуска
 print(f"Запуск бота {VERSION} | Дата и время: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+# Настройка API (временно, позже в Config Vars)
+
+STRIPE_API_KEY = os.getenv("STRIPE_API_KEY", "твой_stripe_ключ")  # По умолчанию временный ключ
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "твой_binance_ключ")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "твой_binance_secret")
+stripe.api_key = STRIPE_API_KEY
 
 # Переводы
 LANGUAGES = {
@@ -41,7 +51,8 @@ LANGUAGES = {
         "task_not_found": "Задача с номером {task_id} не найдена.",
         "invalid_input": "Пожалуйста, введите корректный номер задачи.",
         "invalid_task": "Пожалуйста, укажите задачу с временем (например, 'Купить молоко 5m').",
-        "task_reminder": "Напоминание: выполни задачу '{task}'!"
+        "task_reminder": "Напоминание: выполни задачу '{task}'!",
+        "pay_message": "Оплати доступ для продолжения использования!"
     },
     "en": {
         "start_message": "Hello! I am a task management bot. Choose an action:",
@@ -69,7 +80,8 @@ LANGUAGES = {
         "task_not_found": "Task with number {task_id} not found.",
         "invalid_input": "Please enter a valid task number.",
         "invalid_task": "Please enter a task with a time (e.g., 'Buy milk 5m').",
-        "task_reminder": "Reminder: complete task '{task}'!"
+        "task_reminder": "Reminder: complete task '{task}'!",
+        "pay_message": "Pay to continue using the bot!"
     }
 }
 
@@ -84,10 +96,16 @@ def init_db():
                      (id INTEGER PRIMARY KEY AUTOINCREMENT, task_text TEXT, done INTEGER DEFAULT 0, user_id INTEGER, reminder_time TEXT)''')
     elif 'reminder_time' not in columns:
         c.execute("ALTER TABLE tasks ADD COLUMN reminder_time TEXT")
+    c.execute("PRAGMA table_info(users)")
+    columns = [info[1] for info in c.fetchall()]
+    if not columns:
+        c.execute('''CREATE TABLE users
+                     (user_id INTEGER PRIMARY KEY, registration_date TEXT, paid_status INTEGER DEFAULT 0)''')
     conn.commit()
     c.execute("PRAGMA table_info(tasks)")
-    columns = [info[1] for info in c.fetchall()]
-    print(f"Колонки в таблице tasks: {columns}")
+    print(f"Колонки в таблице tasks: {c.fetchall()}")
+    c.execute("PRAGMA table_info(users)")
+    print(f"Колонки в таблице users: {c.fetchall()}")
     conn.close()
 
 # Функция для отправки напоминаний
@@ -99,7 +117,7 @@ async def send_reminder(context):
     task = c.fetchone()
     conn.close()
     if task:
-        lang = job.data.get('language', 'en')  # Извлекаем язык из job.data
+        lang = job.data.get('language', 'en')
         keyboard = [
             [InlineKeyboardButton(LANGUAGES[lang]["add_task"], callback_data='add_task')],
             [InlineKeyboardButton(LANGUAGES[lang]["show_tasks"], callback_data='list_tasks')],
@@ -112,7 +130,7 @@ async def send_reminder(context):
 
 # Функция для создания клавиатуры
 def get_keyboard(context):
-    lang = context.user_data.get('language', 'en') if context else 'en'  # Безопасная проверка context
+    lang = context.user_data.get('language', 'en') if context else 'en'
     keyboard = [
         [InlineKeyboardButton(LANGUAGES[lang]["add_task"], callback_data='add_task')],
         [InlineKeyboardButton(LANGUAGES[lang]["show_tasks"], callback_data='list_tasks')],
@@ -133,8 +151,17 @@ def get_language_keyboard():
 # Функция для команды /start
 async def start(update, context):
     init_db()
+    user_id = update.effective_user.id
+    conn = sqlite3.connect('tasks.db')
+    c = conn.cursor()
+    c.execute("SELECT registration_date, paid_status FROM users WHERE user_id = ?", (user_id,))
+    user = c.fetchone()
+    if not user:
+        c.execute("INSERT INTO users (user_id, registration_date) VALUES (?, ?)", (user_id, datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        conn.commit()
     lang = context.user_data.get('language', 'en')
     await update.message.reply_text(LANGUAGES[lang]["start_message"], reply_markup=get_keyboard(context))
+    conn.close()
 
 # Функция для команды /language
 async def language(update, context):
@@ -154,11 +181,22 @@ async def set_language(update, context):
 # Функция для обработки нажатий на кнопки
 async def button(update, context):
     query = update.callback_query
-    print(f"Button clicked: {query.data}")  # Отладка: выводим callback_data
+    print(f"Button clicked: {query.data}")
     await query.answer()
     user_id = query.from_user.id
     current_message = query.message.text
     lang = context.user_data.get('language', 'en')
+    conn = sqlite3.connect('tasks.db')
+    c = conn.cursor()
+    c.execute("SELECT paid_status FROM users WHERE user_id = ?", (user_id,))
+    paid_status = c.fetchone()
+    if not paid_status or not paid_status[0]:
+        registration_date = datetime.datetime.strptime(c.execute("SELECT registration_date FROM users WHERE user_id = ?", (user_id,)).fetchone()[0], '%Y-%m-%d %H:%M:%S')
+        if (datetime.datetime.now() - registration_date).days > 7:
+            await query.edit_message_text(LANGUAGES[lang]["pay_message"])
+            conn.close()
+            return
+    conn.close()
 
     if query.data == 'add_task':
         if current_message != LANGUAGES[lang]["input_task"]:
@@ -214,24 +252,44 @@ async def button(update, context):
 # Функция для подтверждения удаления всех задач
 async def confirm_delete_all(update, context):
     query = update.callback_query
-    print(f"Confirm delete all clicked: {query.data}")  # Отладка: выводим callback_data
+    print(f"Confirm delete all clicked: {query.data}")
     await query.answer()
     user_id = query.from_user.id
     lang = context.user_data.get('language', 'en')
-
+    conn = sqlite3.connect('tasks.db')
+    c = conn.cursor()
+    c.execute("SELECT paid_status FROM users WHERE user_id = ?", (user_id,))
+    paid_status = c.fetchone()
+    if not paid_status or not paid_status[0]:
+        registration_date = datetime.datetime.strptime(c.execute("SELECT registration_date FROM users WHERE user_id = ?", (user_id,)).fetchone()[0], '%Y-%m-%d %H:%M:%S')
+        if (datetime.datetime.now() - registration_date).days > 7:
+            await query.edit_message_text(LANGUAGES[lang]["pay_message"])
+            conn.close()
+            return
     if query.data == 'confirm_delete_all_yes':
-        conn = sqlite3.connect('tasks.db')
-        c = conn.cursor()
         c.execute("DELETE FROM tasks WHERE user_id = ?", (user_id,))
         conn.commit()
-        conn.close()
         await query.edit_message_text(LANGUAGES[lang]["delete_all_confirmed"], reply_markup=get_keyboard(context))
     elif query.data == 'confirm_delete_all_no':
         await query.edit_message_text(LANGUAGES[lang]["delete_all_canceled"], reply_markup=get_keyboard(context))
+    conn.close()
 
 # Функция для обработки текстовых сообщений (добавление задач или ID)
 async def handle_message(update, context):
     lang = context.user_data.get('language', 'en')
+    user_id = update.effective_user.id
+    conn = sqlite3.connect('tasks.db')
+    c = conn.cursor()
+    c.execute("SELECT paid_status FROM users WHERE user_id = ?", (user_id,))
+    paid_status = c.fetchone()
+    if not paid_status or not paid_status[0]:
+        registration_date = datetime.datetime.strptime(c.execute("SELECT registration_date FROM users WHERE user_id = ?", (user_id,)).fetchone()[0], '%Y-%m-%d %H:%M:%S')
+        if (datetime.datetime.now() - registration_date).days > 7:
+            await update.message.reply_text(LANGUAGES[lang]["pay_message"])
+            conn.close()
+            return
+    conn.close()
+
     if context.user_data.get('expecting_task'):
         task_text = update.message.text
         reminder = None
@@ -250,7 +308,7 @@ async def handle_message(update, context):
                 delay = int(reminder[:-1]) * 3600
             elif reminder.endswith('m'):
                 delay = int(reminder[:-1]) * 60
-            context.job_queue.run_once(send_reminder, delay, data={'task_id': task_id, 'language': lang})  # Передаем язык в job.data
+            context.job_queue.run_once(send_reminder, delay, data={'task_id': task_id, 'language': lang})
             await update.message.reply_text(LANGUAGES[lang]["task_added"].format(task=task_text, reminder=reminder), reply_markup=get_keyboard(context))
         else:
             await update.message.reply_text(LANGUAGES[lang]["task_added_no_reminder"].format(task=task_text), reply_markup=get_keyboard(context))
@@ -261,7 +319,6 @@ async def handle_message(update, context):
         input_text = update.message.text.strip()
         task_numbers = []
         if ',' in input_text:
-            # Разбираем несколько номеров через запятую
             numbers = input_text.split(',')
             for num in numbers:
                 num = num.strip()
@@ -322,7 +379,7 @@ def run_schedule():
 
 def main():
     application = Application.builder().token(TOKEN).build()
-    application.add_handler(CallbackQueryHandler(confirm_delete_all, pattern='^confirm_delete_all_(yes|no)$'))  # Приоритет для подтверждения
+    application.add_handler(CallbackQueryHandler(confirm_delete_all, pattern='^confirm_delete_all_(yes|no)$'))
     application.add_handler(CallbackQueryHandler(set_language, pattern='^set_lang_'))
     application.add_handler(CallbackQueryHandler(button))
     application.add_handler(CommandHandler("start", start))
