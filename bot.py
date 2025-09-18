@@ -10,7 +10,7 @@ import binance
 import os
 
 # Уникальная метка версии
-VERSION = "v3.32"
+VERSION = "v3.33"
 TOKEN = '8384181109:AAHZ8xVMkg7FGiPWsIP1B0X4LUvl7M5Wopk'
 
 # Вывод версии и времени запуска
